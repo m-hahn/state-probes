@@ -162,10 +162,11 @@ import torch
 
 class WordTokenizer(PreTrainedTokenizerBase):
     def __init__(self, **kwargs):
-        self.itos = ["OOV", "<EOS>", "<BOS>", "<PAD>"]
+        self.itos = ["OOV", "<EOS>", "<BOS>", "<PAD>", "<SEP>"]
         self.stoi = {x : i for i, x in enumerate(self.itos)}
         self._pad_token = self.stoi["<PAD>"]
         self.model_max_length = 200
+        self._separator = self.stoi["<SEP>"]
         pass
 
     def tokenize(self, text, **kwargs):
@@ -234,7 +235,7 @@ if args.eval_only:
     output_json_fn = os.path.join(output_json_dir, f"{os.path.split(probe_save_path)[-1].replace('.p', '.jsonl')}")
     print(f"Saving predictions to {output_json_fn}")
 
-DEBUG = True
+DEBUG = False
 if DEBUG:
     max_data_size = [10,20]
 else:
@@ -303,37 +304,46 @@ for i in range(args.epochs):
 #        print("tgt_state", tgt_state)
 #        print("game_ids", game_ids)
 #        print("entities", entities)
-        print("##############################")
-        print("##############################")
-        print("##############################")
-        print("##############################")
-        print("============================lang_tgts")
-        print("\n".join(tokenizer.towords_batch(lang_tgts["input_ids"])))
-        print("============================inputs")
-        print("\n".join(tokenizer.towords_batch(inputs["input_ids"])))
-        print("============================tgt_state")
+#        print("##############################")
+#        print("##############################")
+#        print("##############################")
+#        print("##############################")
+#        print("============================lang_tgts")
+#        print("\n".join(tokenizer.towords_batch(lang_tgts["input_ids"])))
+#        print("============================inputs")
+#        print("\n".join(tokenizer.towords_batch(inputs["input_ids"])))
+#        print("============================tgt_state")
+        labels = []
+        inputs_and_qs = []
         for q in range(tgt_state["labels"].size()[0]):
             for r in range(tgt_state["labels"].size()[1]):
-                print(tokenizer.towords(tgt_state["all_states_input_ids"][q,r]), ["?", "T", "F"][int(tgt_state["labels"][q,r])])
-#                        gold_state.append({
- #                           "true": [idx_to_state[idx] for idx in (tgt_state['labels'][i] == 1).nonzero(as_tuple=False)[:,0]],
-  #                          "false": [idx_to_state[idx] for idx in (tgt_state['labels'][i] == 2).nonzero(as_tuple=False)[:,0]],
-   #                     })
+              if int(tgt_state["labels"][q,r]) > 0:
+                #print(q, r, tokenizer.towords(tgt_state["all_states_input_ids"][q,r]), ["?", "T", "F"][int(tgt_state["labels"][q,r])], inputs["input_ids"][q])
+                #print(inputs["input_ids"][q].size(), tgt_state["all_states_input_ids"][q,r].size())
+                input_here = torch.cat([inputs["input_ids"][q], torch.LongTensor([tokenizer._separator]), tgt_state["all_states_input_ids"][q,r]], dim=0)
+                inputs_and_qs.append(input_here)
+                labels.append(int(tgt_state["labels"][q,r]))
+        max_length = max([x.size()[0] for x in inputs_and_qs])
+        for q in range(len(labels)):
+            inputs_and_qs[q] = torch.cat([inputs_and_qs[q], (tokenizer._pad_token + torch.zeros(max_length - inputs_and_qs[q].size()[0])).long()], dim=0)
+        inputs_and_qs = torch.stack(inputs_and_qs, dim=0).long()
+        labels = torch.LongTensor(labels)
 
-        continue
+        embedded = embedding(inputs_and_qs)
+        transformed = transformer(embedded)
 
+        prediction = torch.sigmoid(output(transformed[:,0]))
 
-        return_dict = model(
-            input_ids=inputs['input_ids'], attention_mask=inputs['attention_mask'], labels=lang_tgts['input_ids'], return_dict=True,
-        )
-        lang_loss, dec_output, encoder_hidden = return_dict.loss, return_dict.logits, return_dict.encoder_last_hidden_state
-        # encoder_outputs = (encoder_hidden,)
-        lang_train_losses.append(lang_loss.item())
-        lang_loss.backward()
+        loss = -torch.where(labels == 1, prediction.log(), (1-prediction).log()).sum()/10
+
+ #       print(prediction)
+#        print(labels)
+        lang_train_losses.append(loss.item())
+        loss.backward()
         optimizer.step()
         num_updates += 1
-        if j%100 == 0:
-            print(f"epoch {i}, batch {j}, loss: {lang_loss.item()}", flush=True)
+        if j%10 == 0:
+            print(f"epoch {i}, batch {j}, loss: {loss.item()}", flush=True)
 #    avg_val_loss, new_best_loss = eval_checkpoint(
 #        args, i, model, dev_dataloader, save_path=save_path, best_val_loss=best_val_loss,
 #    )
