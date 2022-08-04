@@ -1,3 +1,6 @@
+# python3 train_textworld2.py --data=../../tw_data --gamefile ../../tw_data
+
+
 import torch
 from torch import nn
 from torch import optim
@@ -96,12 +99,41 @@ np.random.seed(args.seed)
 torch.manual_seed(args.seed)
 random.seed(args.seed)
 
+from transformers import PreTrainedTokenizerBase, BatchEncoding
+import torch
+
+class WordTokenizer(PreTrainedTokenizerBase):
+    def __init__(self, **kwargs):
+        self.itos = ["OOV", "<EOS>", "<BOS>", "<PAD>"]
+        self.stoi = {x : i for i, x in enumerate(self.itos)}
+        self._pad_token = self.stoi["<PAD>"]
+        self.model_max_length = 200
+        pass
+
+    def tokenize(self, text, **kwargs):
+        split = text.replace(".", "").replace(",", "").split(" ")
+        return split
+    def convert_tokens_to_ids(self, split):
+        result = []
+        for x in split:
+            if x not in self.stoi and len(self.itos) < 10000:
+                self.stoi[x] = len(self.stoi)
+                self.itos.append(x)
+            result.append(self.stoi.get(x, 0))
+        return torch.LongTensor(result[:self.model_max_length])
+    def batch_encode_plus(self, batch_text_or_text_pairs, **kwargs):
+        converted = [self.convert_tokens_to_ids(self.tokenize(x)) for x in batch_text_or_text_pairs]
+        max_size = max([x.size()[0] for x in converted])
+        for i in range(len(converted)):
+            converted[i] = torch.cat([converted[i], self._pad_token + torch.zeros(max_size - converted[i].size()[0])], dim=0)
+        converted = torch.stack(converted, dim=0)
+        return BatchEncoding({'input_ids' : converted, 'attention_mask' : (converted != self._pad_token).long()})
 # get arch-specific settings and tokenizers
 if arch == 'bart':
     model_class = BartForConditionalGeneration
     config_class = BartConfig
     model_fp = 'facebook/bart-base'
-    tokenizer = BartTokenizerFast.from_pretrained(model_fp, local_files_only=args.local_files_only)
+    tokenizer = WordTokenizer() #BartTokenizerFast.from_pretrained(model_fp, local_files_only=args.local_files_only)
 elif arch == 't5':
     model_class = T5ForConditionalGeneration
     config_class = T5Config
@@ -112,14 +144,22 @@ else:
 
 
 transformer = torch.nn.TransformerEncoder(encoder_layer=torch.nn.TransformerEncoderLayer(d_model=512, nhead=8), num_layers=8)
+embedding = torch.nn.Embedding(num_embeddings=10000, embedding_dim=512)
+output = torch.nn.Linear(512, 1, bias=False)
 
-quit()
+def parameters():
+    for x in [transformer, embedding, output]:
+        for y in x.parameters():
+            yield y
 
-model.to(args.device)
+
+#model.to(args.device)
 
 # load optimizer
-all_parameters = [p for p in model.parameters() if p.requires_grad]
+all_parameters = [p for p in parameters() if p.requires_grad]
 optimizer = AdamW(all_parameters, lr=args.lr)
+
+
 
 # load data
 dev_dataset = TWDataset(
@@ -140,9 +180,9 @@ if args.eval_only:
 # Initial eval
 print("Initial eval")
 avg_val_loss = 0
-results = eval_checkpoint(args, "INIT", model, dev_dataloader)
-avg_val_loss += results[0]
-print(f"CONSISTENCY: loss - {results[0]}")
+#results = eval_checkpoint(args, "INIT", model, dev_dataloader)
+#avg_val_loss += results[0]
+#print(f"CONSISTENCY: loss - {results[0]}")
 best_loss_epoch = -1
 best_val_loss = avg_val_loss
 
@@ -155,11 +195,21 @@ num_updates = 0
 best_update = 0
 for i in range(args.epochs):
     if i - best_loss_epoch > args.patience: break
-    model.train()
+    #model.train()
     lang_train_losses = []
 
     for j, (inputs, lang_tgts, init_state, tgt_state, game_ids, entities) in enumerate(train_dataloader):
         optimizer.zero_grad()
+        print(inputs)
+        print(lang_tgts)
+        print(init_state)
+        print(tgt_state)
+        print(game_ids)
+        print(entities)
+        quit()
+
+
+
         return_dict = model(
             input_ids=inputs['input_ids'], attention_mask=inputs['attention_mask'], labels=lang_tgts['input_ids'], return_dict=True,
         )
@@ -171,9 +221,9 @@ for i in range(args.epochs):
         num_updates += 1
         if j%100 == 0:
             print(f"epoch {i}, batch {j}, loss: {lang_loss.item()}", flush=True)
-    avg_val_loss, new_best_loss = eval_checkpoint(
-        args, i, model, dev_dataloader, save_path=save_path, best_val_loss=best_val_loss,
-    )
+#    avg_val_loss, new_best_loss = eval_checkpoint(
+#        args, i, model, dev_dataloader, save_path=save_path, best_val_loss=best_val_loss,
+#    )
     if new_best_loss:
         best_val_loss = avg_val_loss
         best_loss_epoch = i
