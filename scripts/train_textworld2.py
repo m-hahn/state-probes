@@ -1,5 +1,6 @@
 # python3 train_textworld2.py --data=../../tw_data --gamefile ../../tw_data
 
+# python3 train_textworld2.py --data=../../tw_data/simple_traces/ --gamefile ../../tw_data/simple_games/
 
 import torch
 from torch import nn
@@ -25,6 +26,25 @@ import glob
 
 from metrics.tw_metrics import consistencyCheck
 from data.textworld.tw_dataloader import TWDataset, TWFullDataLoader
+
+from localizer.tw_localizer import TWLocalizer
+from metrics.tw_metrics import get_em, get_confusion_matrix
+from data.textworld.parse_tw import (
+    translate_inv_items_to_str, translate_inv_str_to_items,
+)
+from data.textworld.utils import (
+    EntitySet, control_mention_to_tgt_simple, control_mention_to_tgt_with_rooms_simple,
+    load_possible_pairs, load_negative_tgts,
+)
+from data.textworld.tw_dataloader import (
+    TWDataset, TWEntitySetDataset, TWFullDataLoader, TWEntitySetDataLoader,
+)
+
+from probe_models import (
+    ProbeLinearModel, ProbeConditionalGenerationModel, ProbeLanguageEncoder, encode_target_states,
+    get_probe_model, get_state_encoder, get_lang_model,
+)
+from itertools import chain, combinations
 
 
 def eval_checkpoint(
@@ -70,21 +90,59 @@ parser.add_argument('--epochs', type=int, default=20)
 parser.add_argument('--eval_only', action='store_true', default=False)
 parser.add_argument('--gamefile', type=str, required=False)
 parser.add_argument('--lr', type=float, default=1e-5)
+parser.add_argument('--lm_save_path', type=str, default="SAVE/")
 parser.add_argument('--max_seq_len', type=int, default=512)
+parser.add_argument('--metric', type=str, choices=['em', 'loss'], help='which metric to use on dev set', default='em')
+parser.add_argument('--probe_save_path', type=str, default=None)
+parser.add_argument('--probe_layer', type=int, default=-1, help="which layer of the model to probe")
 parser.add_argument('--num_samples', type=int, default=1)
 parser.add_argument('--no_pretrain', action='store_true', default=False)
 parser.add_argument('--save_path', type=str, default=None)
-parser.add_argument('--seed', type=int, default=42)
+parser.add_argument('--probe_type', type=str, choices=['3linear_classify', 'linear_classify', 'linear_retrieve', 'decoder'], default='decoder')
+parser.add_argument('--encode_tgt_state', type=str, default=False, choices=[False, 'NL.bart', 'NL.t5'], help="how to encode the state before probing")
 parser.add_argument('--train_data_size', type=int, default=4000)
+parser.add_argument('--tgt_agg_method', type=str, choices=['sum', 'avg', 'first', 'last', 'lin_attn', 'ffn_attn', 'self_attn'], default='avg', help="how to aggregate across tokens of target, if `encode_tgt_state` is set True")
+parser.add_argument('--probe_agg_method', type=str, choices=[None, 'sum', 'avg', 'first', 'last', 'lin_attn', 'ffn_attn', 'self_attn'], default=None, help="how to aggregate across tokens")
+parser.add_argument('--probe_attn_dim', type=int, default=None, help="what dimensions to compress sequence tokens to")
 parser.add_argument('--patience', type=int, default=10)
+parser.add_argument('--control_input', default=False, action='store_true', help='control inputs to tokenized entity pair')
 parser.add_argument('--local_files_only', action='store_true', default=False, help="use pretrained checkpoints saved in local directories")
+parser.add_argument('--probe_target', type=str, default='final.belief_facts', choices=list(chain(*[[
+    f'{init_final}.full_facts', f'{init_final}.full_belief_facts', f'{init_final}.belief_facts',
+    f'{init_final}.belief_facts_single', f'{init_final}.belief_facts_pair',
+    f'{init_final}.full_belief_facts_single', f'{init_final}.full_belief_facts_pair',
+    f'{init_final}.belief_facts_single.control', f'{init_final}.full_belief_facts_single.control', f'{init_final}.belief_facts_single.control_with_rooms', f'{init_final}.full_belief_facts_single.control_with_rooms',
+    f'{init_final}.belief_facts_pair.control', f'{init_final}.full_belief_facts_pair.control', f'{init_final}.belief_facts_pair.control_with_rooms', f'{init_final}.full_belief_facts_pair.control_with_rooms',
+] for init_final in ['init', 'final']])))
+parser.add_argument('--localizer_type', type=str, default='all',
+    choices=['all'] + [f'belief_facts_{sides}_{agg}' for sides in ['single', 'pair'] for agg in ['all', 'first', 'last']],
+    help="which encoded tokens of the input to probe."
+    "Set to `all`, `belief_facts_{single|pair}_{all|first|last}`")
+parser.add_argument('--seed', type=int, default=42)
+parser.add_argument('--ents_to_states_file', type=str, default=None, help='Filepath to precomputed state vectors')
 args = parser.parse_args()
 
 arch = args.arch
 pretrain = not args.no_pretrain
 batchsize = args.batchsize
+control_input = args.control_input
 eval_batchsize = args.eval_batchsize
 max_seq_len = args.max_seq_len
+lm_save_path = args.lm_save_path
+localizer_type = args.localizer_type
+probe_target = args.probe_target.split('.')
+probe_type = args.probe_type
+retrieve = probe_type.endswith('retrieve')
+classify = probe_type.endswith('classify')
+assert not (retrieve and classify)
+encode_tgt_state = args.encode_tgt_state
+tgt_agg_method = args.tgt_agg_method
+probe_agg_method = args.probe_agg_method
+probe_attn_dim = args.probe_attn_dim
+probe_save_path = args.probe_save_path
+train_data_size = args.train_data_size
+game_kb = None
+
 inform7_game = None
 # maybe inexact (grammars between worlds might be different(?)) but more efficient
 for fn in glob.glob(os.path.join(args.gamefile, 'train/*.ulx')):
@@ -111,16 +169,22 @@ class WordTokenizer(PreTrainedTokenizerBase):
         pass
 
     def tokenize(self, text, **kwargs):
-        split = text.replace(".", "").replace(",", "").split(" ")
+        split = text.replace(".", "").replace(",", "").lower().split(" ")
         return split
     def convert_tokens_to_ids(self, split):
         result = []
         for x in split:
+            x = x.lower()
             if x not in self.stoi and len(self.itos) < 10000:
                 self.stoi[x] = len(self.stoi)
                 self.itos.append(x)
             result.append(self.stoi.get(x, 0))
         return torch.LongTensor(result[:self.model_max_length])
+    def towords_batch(self, tensor):
+        return [self.towords(x) for x in tensor]
+    def towords(self, tensor):
+        tensor = tensor.long().cpu().numpy().tolist()
+        return " ".join([self.itos[x] for x in tensor])
     def batch_encode_plus(self, batch_text_or_text_pairs, **kwargs):
         converted = [self.convert_tokens_to_ids(self.tokenize(x)) for x in batch_text_or_text_pairs]
         max_size = max([x.size()[0] for x in converted])
@@ -160,17 +224,50 @@ all_parameters = [p for p in parameters() if p.requires_grad]
 optimizer = AdamW(all_parameters, lr=args.lr)
 
 
+print("Loaded model")
 
+print(f"Saving probe checkpoints to {probe_save_path}")
+output_json_fn = None
+if args.eval_only:
+    output_json_dir = os.path.split(probe_save_path)[0]
+    if not os.path.exists(output_json_dir): os.makedirs(output_json_dir)
+    output_json_fn = os.path.join(output_json_dir, f"{os.path.split(probe_save_path)[-1].replace('.p', '.jsonl')}")
+    print(f"Saving predictions to {output_json_fn}")
+
+DEBUG = True
+if DEBUG:
+    max_data_size = [10,20]
+else:
+    max_data_size = [500,train_data_size]
+
+state_key = probe_target[1].replace('_single', '').replace('_pair', '')
+tgt_state_key = probe_target[0]+'_states'
+possible_pairs = None
+ent_set_size = 2
+if probe_target[1].endswith('_pair'):
+    ent_set_size = 2
+    possible_pairs = load_possible_pairs(pair_out_file=os.path.join(args.data, 'entity_pairs.json'))
+    assert possible_pairs is not None
+if probe_target[1].endswith('_single'): ent_set_size = 1
+neg_facts_fn = args.ents_to_states_file
+
+precomputed_negs = None
+control = probe_target[2] if len(probe_target)>2 else False
 # load data
-dev_dataset = TWDataset(
-    args.data, tokenizer, 'dev', max_seq_len, max_data_size=500, inform7_game=inform7_game,
+dev_dataset = TWEntitySetDataset(
+    args.data, tokenizer, 'dev', max_seq_len=max_seq_len, ent_set_size=ent_set_size, control=control,
+    gamefile=args.gamefile, state_key=state_key, tgt_state_key=tgt_state_key, max_data_size=max_data_size[0],
+    inform7_game=inform7_game, possible_pairs=possible_pairs, precomputed_negs=precomputed_negs,
 )
-dataset = TWDataset(
-    args.data, tokenizer, 'train', max_seq_len, max_data_size=4000, inform7_game=inform7_game,
+dataset = TWEntitySetDataset(
+    args.data, tokenizer, 'train', max_seq_len=max_seq_len, ent_set_size=ent_set_size, control=control,
+    gamefile=args.gamefile, state_key=state_key, tgt_state_key=tgt_state_key, max_data_size=max_data_size[1],
+    inform7_game=inform7_game, possible_pairs=possible_pairs, precomputed_negs=precomputed_negs,
 )
-train_dataloader = TWFullDataLoader(dataset, args.gamefile, tokenizer, batchsize, device=args.device)
-dev_dataloader = TWFullDataLoader(dev_dataset, args.gamefile, tokenizer, eval_batchsize, device=args.device)
 print(f"Loaded data: {len(dataset)} train examples, {len(dev_dataset)} dev examples")
+train_dataloader = TWEntitySetDataLoader(dataset, tokenizer, batchsize, control_input, device=args.device)
+dev_dataloader = TWEntitySetDataLoader(dev_dataset, tokenizer, eval_batchsize, control_input, device=args.device)
+print("Created batches")
 
 output_json_fn = None
 if args.eval_only:
@@ -200,14 +297,30 @@ for i in range(args.epochs):
 
     for j, (inputs, lang_tgts, init_state, tgt_state, game_ids, entities) in enumerate(train_dataloader):
         optimizer.zero_grad()
-        print(inputs)
-        print(lang_tgts)
-        print(init_state)
-        print(tgt_state)
-        print(game_ids)
-        print(entities)
-        quit()
+#        print("inputs", inputs)
+#        print("lang_tgts", lang_tgts)
+#        print("init_state", init_state)
+#        print("tgt_state", tgt_state)
+#        print("game_ids", game_ids)
+#        print("entities", entities)
+        print("##############################")
+        print("##############################")
+        print("##############################")
+        print("##############################")
+        print("============================lang_tgts")
+        print("\n".join(tokenizer.towords_batch(lang_tgts["input_ids"])))
+        print("============================inputs")
+        print("\n".join(tokenizer.towords_batch(inputs["input_ids"])))
+        print("============================tgt_state")
+        for q in range(tgt_state["labels"].size()[0]):
+            for r in range(tgt_state["labels"].size()[1]):
+                print(tokenizer.towords(tgt_state["all_states_input_ids"][q,r]), ["?", "T", "F"][int(tgt_state["labels"][q,r])])
+#                        gold_state.append({
+ #                           "true": [idx_to_state[idx] for idx in (tgt_state['labels'][i] == 1).nonzero(as_tuple=False)[:,0]],
+  #                          "false": [idx_to_state[idx] for idx in (tgt_state['labels'][i] == 2).nonzero(as_tuple=False)[:,0]],
+   #                     })
 
+        continue
 
 
         return_dict = model(

@@ -66,6 +66,10 @@ def pad_stack(inputs, pad_idx=1, device='cpu'):
         mask_size[0] =  max_nfacts - mask_size[0]
         new_mask = torch.cat([new_mask, torch.zeros(mask_size[0], max_seqlen, *mask_size[2:]).to(inp['attention_mask'].device, inp['attention_mask'].dtype)], dim=0)
         new_inp = torch.ones(max_nfacts, max_seqlen, *inp['input_ids'].size()[2:]).to(inp['input_ids'].device, inp['input_ids'].dtype) * pad_idx
+#        print(new_mask)
+#        print(inp['input_ids'])
+#        print(inp['attention_mask'])
+
         new_inp[new_mask.bool()] = inp['input_ids'][inp['attention_mask'].bool()]
         # pad and stack tensors
         mask_list.append(new_mask)
@@ -121,7 +125,7 @@ def load_possible_pairs(pair_out_file=None, data_dir=None, game_ids=None):
         return None
 
 
-def load_negative_tgts(negative_tgts_fn=None, data_dir=None, ent_set_size=None, tokenizer=None, game_ids=None):
+def load_negative_tgts(negative_tgts_fn=None, data_dir=None, ent_set_size=None, tokenizer=None, game_ids=None, state_encoder=None):
     if negative_tgts_fn and os.path.exists(negative_tgts_fn):
         negative_tgts_serialized = torch.load(negative_tgts_fn)
         return negative_tgts_serialized
@@ -198,7 +202,7 @@ def gen_possible_pairs(data_dir, game_ids):
     return all_possible_pairs, type_to_gid_to_ents
 
 
-def gen_all_facts(gamefile, state_encoder, probe_outs, tokenizer, game_ids, ent_set_size, device):
+def gen_all_facts(gamefile, state_encoder, probe_outs, tokenizer, game_ids, ent_set_size, device='cpu'):
     game_id_to_entities = {}
     game_id_to_objs = {}
     game_ids_to_kb = {}
@@ -404,7 +408,7 @@ def gen_all_facts_pairs(state_encoder, probe_outs, tokenizer, game_ids, game_id_
         token_all_facts[entset_serialize] = tokenizer(batch_all_facts[entset_serialize], return_tensors='pt', padding=True, truncation=True)
         
         tokens = token_all_facts[entset_serialize].to(device)
-        vectors = state_encoder(input_ids=tokens['input_ids'], attention_mask=tokens['attention_mask'], return_dict=True).last_hidden_state.to('cpu')
+        vectors = state_encoder(input_ids=tokens['input_ids'], attention_mask=tokens['attention_mask'], return_dict=True)['last_hidden_state'].to('cpu')
 
         '''
         model forward

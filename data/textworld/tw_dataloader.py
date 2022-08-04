@@ -149,6 +149,14 @@ class TWDataset(Dataset):
         if self.logger: self.logger.info(f"Using files order: {init_actions_data['filenames']}")
         self.data = init_actions_data
 
+class SimpleStateEncoder():
+    def __init__(self, **kwargs):
+        pass
+#        print("Line 154")
+ #       print(kwargs)
+    def __call__(self, **kwargs):
+        kwargs['last_hidden_state'] = kwargs['input_ids'] #torch.zeros(1)
+        return kwargs
 
 class TWEntitySetDataset(TWDataset):
     """
@@ -204,9 +212,10 @@ class TWEntitySetDataset(TWDataset):
         super().load_data()
         # compute negs here (if not already pre-loaded from file...)
         if self.precomputed_negs is None:
+            state_encoder = SimpleStateEncoder()
             if self.ent_set_size == 2:
                 self.possible_pairs = load_possible_pairs(data_dir=self.gamefile, game_ids=self.get_gameids())
-            self.precomputed_negs = load_negative_tgts(data_dir=self.gamefile, tokenizer=self.tokenizer, game_ids=self.get_gameids(), ent_set_size=self.ent_set_size)
+            self.precomputed_negs = load_negative_tgts(data_dir=self.gamefile, tokenizer=self.tokenizer, game_ids=self.get_gameids(), ent_set_size=self.ent_set_size, state_encoder=state_encoder)
 
         entities_data = {
             'contexts': [], 'tgts': [], 'init_states': [], 'tgt_states': [], 'filenames': [], 'game_ids': [],
@@ -269,6 +278,7 @@ class TWEntitySetDataset(TWDataset):
                 entities_data['labels'].append(labels)
                 entities_data['all_states_tokenized'].append(all_states_inputs)
                 entities_data['all_states_encoded'].append(all_states_vectors)
+#        assert False, entities_data['tgt_states']
         self.data = entities_data
 
     def get_matching_state_label(self, entset, target_state, precomputed_negs):
@@ -403,12 +413,14 @@ class TWFullDataLoader(DataLoader):
                 state_key = state_keys[0]
                 self.tgt_state_key = tgt_state_keys[0]
         self.states = states
+        #assert False, self.states
         self.nnegs = nnegs
         self.npos = npos
         self.append_facts_to_input = append_facts_to_input
         self.device = device
     
     def update_state(self, new_states):
+        assert False, self.states
         self.states = new_states
 
     def collate_fn(self, batch):
@@ -428,6 +440,7 @@ class TWFullDataLoader(DataLoader):
         
         init_states = {}
         final_state = {}
+        assert False, self.state_keys
         for sk, state_key in enumerate(self.state_keys):
             if 'belief_facts' in state_key:
                 init_states[state_key] = {tf: [] for tf in batch[0]['init_state'][state_key]}
@@ -455,7 +468,9 @@ class TWFullDataLoader(DataLoader):
                     else:
                         tgt_facts = tgt_facts_gold
                     final_state[state_key][tf].append(tgt_facts)
-                    
+
+#        print(init_states, "line 459")
+ #       print(final_state, "line 459")
         init_state_tokens = {}
         tgt_state_tokens = {}
         for state_key in init_states:
