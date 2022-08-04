@@ -2,6 +2,8 @@
 
 # python3 train_textworld2.py --data=../../tw_data/simple_traces/ --gamefile ../../tw_data/simple_games/
 
+# ~/python-py37-mhahn train_textworld2.py --data=/juice/scr/mhahn/CODE/FORM-MEANING/DATA/tw_data/simple_traces --gamefile /juice/scr/mhahn/CODE/FORM-MEANING/DATA/tw_data/simple_games --device=cuda
+
 import torch
 from torch import nn
 from torch import optim
@@ -207,10 +209,14 @@ elif arch == 't5':
 else:
     raise NotImplementedError()
 
+def to_device(x):
+ if args.device == "cuda":
+  return x.cuda()
+ return x
 
-transformer = torch.nn.TransformerEncoder(encoder_layer=torch.nn.TransformerEncoderLayer(d_model=512, nhead=8), num_layers=8)
-embedding = torch.nn.Embedding(num_embeddings=10000, embedding_dim=512)
-output = torch.nn.Linear(512, 1, bias=False)
+transformer = to_device(torch.nn.TransformerEncoder(encoder_layer=torch.nn.TransformerEncoderLayer(d_model=512, nhead=8), num_layers=8))
+embedding = to_device(torch.nn.Embedding(num_embeddings=10000, embedding_dim=512))
+output = to_device(torch.nn.Linear(512, 1, bias=False))
 
 def parameters():
     for x in [transformer, embedding, output]:
@@ -291,11 +297,10 @@ if args.eval_only:
 print("Start training")
 num_updates = 0
 best_update = 0
+per_epoch = []
+loss_running_average = 5
 for i in range(args.epochs):
-    if i - best_loss_epoch > args.patience: break
-    #model.train()
-    lang_train_losses = []
-
+    per_epoch.append(0)
     for j, (inputs, lang_tgts, init_state, tgt_state, game_ids, entities) in enumerate(train_dataloader):
         optimizer.zero_grad()
 #        print("inputs", inputs)
@@ -320,14 +325,16 @@ for i in range(args.epochs):
               if int(tgt_state["labels"][q,r]) > 0:
                 #print(q, r, tokenizer.towords(tgt_state["all_states_input_ids"][q,r]), ["?", "T", "F"][int(tgt_state["labels"][q,r])], inputs["input_ids"][q])
                 #print(inputs["input_ids"][q].size(), tgt_state["all_states_input_ids"][q,r].size())
-                input_here = torch.cat([inputs["input_ids"][q], torch.LongTensor([tokenizer._separator]), tgt_state["all_states_input_ids"][q,r]], dim=0)
+                input_here = torch.cat([inputs["input_ids"][q], to_device(torch.LongTensor([tokenizer._separator])), tgt_state["all_states_input_ids"][q,r]], dim=0)
                 inputs_and_qs.append(input_here)
                 labels.append(int(tgt_state["labels"][q,r]))
+        if len(inputs_and_qs) == 0:
+          continue
         max_length = max([x.size()[0] for x in inputs_and_qs])
         for q in range(len(labels)):
-            inputs_and_qs[q] = torch.cat([inputs_and_qs[q], (tokenizer._pad_token + torch.zeros(max_length - inputs_and_qs[q].size()[0])).long()], dim=0)
+            inputs_and_qs[q] = torch.cat([inputs_and_qs[q], to_device((tokenizer._pad_token + torch.zeros(max_length - inputs_and_qs[q].size()[0]))).long()], dim=0)
         inputs_and_qs = torch.stack(inputs_and_qs, dim=0).long()
-        labels = torch.LongTensor(labels)
+        labels = to_device(torch.LongTensor(labels))
 
         embedded = embedding(inputs_and_qs)
         transformed = transformer(embedded)
@@ -335,18 +342,18 @@ for i in range(args.epochs):
         prediction = torch.sigmoid(output(transformed[:,0]))
 
         loss = -torch.where(labels == 1, prediction.log(), (1-prediction).log()).sum()/10
-
  #       print(prediction)
 #        print(labels)
-        lang_train_losses.append(loss.item())
         loss.backward()
         optimizer.step()
         num_updates += 1
+        loss_running_average = 0.95 * loss_running_average + (1-0.95) * float(loss)
         if j%10 == 0:
-            print(f"epoch {i}, batch {j}, loss: {loss.item()}", flush=True)
+            print(f"epoch {i}, batch {j}, loss: {loss.item()}", [round(x,3) for x in per_epoch[:-1]], loss_running_average, flush=True)
+        per_epoch[-1] += float(loss)/1000
 #    avg_val_loss, new_best_loss = eval_checkpoint(
 #        args, i, model, dev_dataloader, save_path=save_path, best_val_loss=best_val_loss,
 #    )
-    if new_best_loss:
-        best_val_loss = avg_val_loss
-        best_loss_epoch = i
+#    if new_best_loss:
+#        best_val_loss = avg_val_loss
+#        best_loss_epoch = i
