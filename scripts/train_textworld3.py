@@ -244,7 +244,7 @@ if args.eval_only:
     output_json_fn = os.path.join(output_json_dir, f"{os.path.split(probe_save_path)[-1].replace('.p', '.jsonl')}")
     print(f"Saving predictions to {output_json_fn}")
 
-DEBUG = True
+DEBUG = False
 if DEBUG:
     max_data_size = [5,5]
 else:
@@ -305,7 +305,7 @@ loss_running_average = 5
 for i in range(args.epochs):
     per_epoch.append(0)
 
-
+    correct, violation = 0, 0
     input_to_responses = {}
     for j, (inputs, lang_tgts, init_state, tgt_state, game_ids, entities) in enumerate(train_dataloader):
 #        if j != 0:
@@ -348,7 +348,10 @@ for i in range(args.epochs):
 #                Y = 0
                 Z = int(tgt_state["labels"][q,r])
                 if (X,Y) in input_to_responses:
-                    assert input_to_responses[(X,Y)] == Z
+                    if input_to_responses[(X,Y)] == Z:
+                      correct += 1
+                    else:
+                      violation += 1
                 input_to_responses[(X,Y)] = Z
 #              if len(inputs_and_qs) > 0:
  #               break
@@ -393,7 +396,7 @@ for i in range(args.epochs):
         num_updates += 1
         loss_running_average = 0.95 * loss_running_average + (1-0.95) * float(loss)
         if j%10 == 0:
-            print(f"epoch {i}, batch {j}, loss: {loss.item()}", [round(x,3) for x in per_epoch[-10:-1]], loss_running_average, flush=True)
+            print(f"epoch {i}, batch {j}, loss: {loss.item()}", [round(x,3) for x in per_epoch[-10:-1]], loss_running_average, correct, violation, flush=True)
         per_epoch[-1] += float(loss)/100
 #    avg_val_loss, new_best_loss = eval_checkpoint(
 #        args, i, model, dev_dataloader, save_path=save_path, best_val_loss=best_val_loss,

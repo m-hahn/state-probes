@@ -244,7 +244,7 @@ if args.eval_only:
     output_json_fn = os.path.join(output_json_dir, f"{os.path.split(probe_save_path)[-1].replace('.p', '.jsonl')}")
     print(f"Saving predictions to {output_json_fn}")
 
-DEBUG = True
+DEBUG = False
 if DEBUG:
     max_data_size = [5,5]
 else:
@@ -305,6 +305,7 @@ loss_running_average = 5
 for i in range(args.epochs):
     per_epoch.append(0)
 
+    correct, violation = 0, 0
     batch_input = []
     batch_labels = []
     input_to_responses = {}
@@ -328,10 +329,10 @@ for i in range(args.epochs):
 #        print("============================tgt_state")
         labels = []
         inputs_and_qs = []
- #       print(tgt_state["labels"].size())
+#       print(tgt_state["labels"].size())
         for q in range(tgt_state["labels"].size()[0]):
             for r in range(tgt_state["labels"].size()[1]):
-#              print(q, r)
+#              print(tgt_state["labels"].size(), "===>", q, r)
               if int(tgt_state["labels"][q,r]) > 0:
          #       print(q, r, tokenizer.towords(tgt_state["all_states_input_ids"][q,r]), ["?", "T", "F"][int(tgt_state["labels"][q,r])], tokenizer.towords(inputs["input_ids"][q]))
                 #print(inputs["input_ids"][q].size(), tgt_state["all_states_input_ids"][q,r].size())
@@ -344,17 +345,20 @@ for i in range(args.epochs):
 #                Y = 0
                 Z = int(tgt_state["labels"][q,r])
                 if (X,Y) in input_to_responses:
-                    assert input_to_responses[(X,Y)] == Z
+                    if input_to_responses[(X,Y)] == Z:
+                      correct += 1
+                    else:
+                      violation += 1
                 input_to_responses[(X,Y)] = Z
-                if len(batch_labels) % 3 == 0:
+                if len(batch_labels) % 64 == 0:
                   inputs_and_qs = batch_input
                   labels = batch_labels
 
                   batch_input = []
                   batch_labels = []
                   max_length = max([x.size()[0] for x in inputs_and_qs])
-                  for q in range(len(labels)):
-                      inputs_and_qs[q] = torch.cat([inputs_and_qs[q], to_device((tokenizer._pad_token + torch.zeros(max_length - inputs_and_qs[q].size()[0]))).long()], dim=0)
+                  for y in range(len(labels)):
+                      inputs_and_qs[y] = torch.cat([inputs_and_qs[y], to_device((tokenizer._pad_token + torch.zeros(max_length - inputs_and_qs[y].size()[0]))).long()], dim=0)
           #            print("INPUT", q, tokenizer.towords(inputs_and_qs[q]))
                   inputs_and_qs = torch.stack(inputs_and_qs, dim=0).long()
                   labels = to_device(torch.LongTensor(labels))
@@ -379,7 +383,7 @@ for i in range(args.epochs):
           #                z += 1
           
             #      print(torch.where(labels == 1, prediction.log(), (1-prediction).log()))
-                  loss = -torch.where(labels == 1, prediction.log(), (1-prediction).log()).sum()/10
+                  loss = -torch.where(labels == 1, prediction.log(), (1-prediction).log()).mean()
            #       print(prediction)
           #        print(labels)
                   optimizer.zero_grad()
@@ -389,7 +393,7 @@ for i in range(args.epochs):
                   num_updates += 1
                   loss_running_average = 0.95 * loss_running_average + (1-0.95) * float(loss)
                   if j%10 == 0:
-                      print(f"epoch {i}, batch {j}, loss: {loss.item()}", [round(x,3) for x in per_epoch[-10:-1]], loss_running_average, flush=True)
+                      print(f"epoch {i}, batch {j}, loss: {loss.item()}", [round(x,3) for x in per_epoch[-10:-1]], loss_running_average, correct, violation, flush=True)
                   per_epoch[-1] += float(loss)/100
 #    avg_val_loss, new_best_loss = eval_checkpoint(
 #        args, i, model, dev_dataloader, save_path=save_path, best_val_loss=best_val_loss,
