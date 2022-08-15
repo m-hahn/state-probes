@@ -1,9 +1,3 @@
-# python3 train_textworld2.py --data=../../tw_data --gamefile ../../tw_data
-
-# python3 train_textworld2.py --data=../../tw_data/simple_traces/ --gamefile ../../tw_data/simple_games/
-
-# ~/python-py37-mhahn train_textworld2.py --data=/juice/scr/mhahn/CODE/FORM-MEANING/DATA/tw_data/simple_traces --gamefile /juice/scr/mhahn/CODE/FORM-MEANING/DATA/tw_data/simple_games --device=cuda
-
 import torch
 from torch import nn
 from torch import optim
@@ -13,7 +7,7 @@ import numpy as np
 import textworld
 from transformers import BartConfig, T5Config
 from transformers import BartTokenizerFast, T5TokenizerFast
-from transformers import BartForConditionalGeneration, T5ForConditionalGeneration
+from transformers import BartForConditionalGeneration, T5ForConditionalGeneration, BartForSequenceClassification
 from transformers import AdamW
 from transformers.models.bart.modeling_bart import BartEncoder
 
@@ -87,7 +81,7 @@ parser.add_argument('--arch', type=str, default='bart', choices=['bart', 't5'])
 parser.add_argument('--batchsize', type=int, default=4)
 parser.add_argument('--eval_batchsize', type=int, default=32)
 parser.add_argument('--data', type=str, required=True)
-parser.add_argument('--device', type=str, default='cpu')
+parser.add_argument('--device', type=str, default='cuda')
 parser.add_argument('--epochs', type=int, default=20)
 parser.add_argument('--eval_only', action='store_true', default=False)
 parser.add_argument('--gamefile', type=str, required=False)
@@ -102,6 +96,7 @@ parser.add_argument('--no_pretrain', action='store_true', default=False)
 parser.add_argument('--save_path', type=str, default=None)
 parser.add_argument('--probe_type', type=str, choices=['3linear_classify', 'linear_classify', 'linear_retrieve', 'decoder'], default='decoder')
 parser.add_argument('--encode_tgt_state', type=str, default=False, choices=[False, 'NL.bart', 'NL.t5'], help="how to encode the state before probing")
+#parser.add_argument('--seed', type=int, default=42)
 parser.add_argument('--train_data_size', type=int, default=4000)
 parser.add_argument('--tgt_agg_method', type=str, choices=['sum', 'avg', 'first', 'last', 'lin_attn', 'ffn_attn', 'self_attn'], default='avg', help="how to aggregate across tokens of target, if `encode_tgt_state` is set True")
 parser.add_argument('--probe_agg_method', type=str, choices=[None, 'sum', 'avg', 'first', 'last', 'lin_attn', 'ffn_attn', 'self_attn'], default=None, help="how to aggregate across tokens")
@@ -162,45 +157,12 @@ random.seed(args.seed)
 from transformers import PreTrainedTokenizerBase, BatchEncoding
 import torch
 
-class WordTokenizer(PreTrainedTokenizerBase):
-    def __init__(self, **kwargs):
-        self.itos = ["OOV", "<EOS>", "<BOS>", "<PAD>", "<SEP>"]
-        self.stoi = {x : i for i, x in enumerate(self.itos)}
-        self._pad_token = self.stoi["<PAD>"]
-        self.model_max_length = 200
-        self._separator = self.stoi["<SEP>"]
-        pass
-
-    def tokenize(self, text, **kwargs):
-        split = text.replace(".", "").replace(",", "").lower().split(" ")
-        return split
-    def convert_tokens_to_ids(self, split):
-        result = []
-        for x in split:
-            x = x.lower()
-            if x not in self.stoi and len(self.itos) < 10000:
-                self.stoi[x] = len(self.stoi)
-                self.itos.append(x)
-            result.append(self.stoi.get(x, 0))
-        return torch.LongTensor(result[:self.model_max_length])
-    def towords_batch(self, tensor):
-        return [self.towords(x) for x in tensor]
-    def towords(self, tensor):
-        tensor = tensor.long().cpu().numpy().tolist()
-        return " ".join([self.itos[x] for x in tensor])
-    def batch_encode_plus(self, batch_text_or_text_pairs, **kwargs):
-        converted = [self.convert_tokens_to_ids(self.tokenize(x)) for x in batch_text_or_text_pairs]
-        max_size = max([x.size()[0] for x in converted])
-        for i in range(len(converted)):
-            converted[i] = torch.cat([converted[i], self._pad_token + torch.zeros(max_size - converted[i].size()[0])], dim=0)
-        converted = torch.stack(converted, dim=0)
-        return BatchEncoding({'input_ids' : converted, 'attention_mask' : (converted != self._pad_token).long()})
 # get arch-specific settings and tokenizers
 if arch == 'bart':
-    model_class = BartForConditionalGeneration
+    model_class = BartForSequenceClassification
     config_class = BartConfig
     model_fp = 'facebook/bart-base'
-    tokenizer = WordTokenizer() #BartTokenizerFast.from_pretrained(model_fp, local_files_only=args.local_files_only)
+    tokenizer = BartTokenizerFast.from_pretrained(model_fp, local_files_only=args.local_files_only)
 elif arch == 't5':
     model_class = T5ForConditionalGeneration
     config_class = T5Config
@@ -214,24 +176,37 @@ def to_device(x):
   return x.cuda()
  return x
 
-transformer = to_device(torch.nn.LSTM(input_size=32, hidden_size=32, batch_first=True, bidirectional=True))
-embedding = to_device(torch.nn.Embedding(num_embeddings=10000, embedding_dim=32))
-output = to_device(torch.nn.Linear(64, 1, bias=False))
+# load or create model(s)
+load_model = False
+save_path = args.save_path
+if not save_path:
+    os.makedirs("twModels", exist_ok=True)
+    save_path = os.path.join(
+        f"twModels",
+        f"{'pre_' if pretrain else 'nonpre_'}{arch}_lr{args.lr}_{args.data.split('/')[-1]}{'_seed'+str(args.seed)}.p",
+    )
+if os.path.exists(save_path):
+    model_dict = torch.load(save_path)
+    load_model = True
+    print("Loading LM model")
+if not load_model: print("Creating LM model")
+if not load_model and pretrain:
+    model = model_class.from_pretrained(model_fp, local_files_only=args.local_files_only)
+else:
+    config = config_class.from_pretrained(model_fp, local_files_only=args.local_files_only)
+    model = model_class(config)
+if load_model:
+    model.load_state_dict(model_dict)
+print(f"    model path: {save_path}")
+config = model.config
 
-def parameters():
-    for x in [transformer, embedding, output]:
-#    for x in [embedding]:
-        for y in x.parameters():
-            yield y
-
-
-#model.to(args.device)
+model.to(args.device)
 
 # load optimizer
-all_parameters = [p for p in parameters() if p.requires_grad]
+all_parameters = [p for p in model.parameters() if p.requires_grad]
 #print(all_parameters)
 #quit()
-optimizer = torch.optim.Adam(all_parameters, lr=args.lr)
+optimizer = torch.optim.AdamW(all_parameters, lr=args.lr)
 
 
 print("Loaded model")
@@ -246,7 +221,7 @@ if args.eval_only:
 
 DEBUG = False
 if DEBUG:
-    max_data_size = [5,5]
+    max_data_size = [2,2]
 else:
     max_data_size = [500,train_data_size]
 
@@ -303,55 +278,41 @@ best_update = 0
 per_epoch = []
 loss_running_average = 5
 for i in range(args.epochs):
-    per_epoch.append(0)
+    print("STARTING EPOCH")
+    #if i - best_loss_epoch > args.patience: break
+    model.train()
+    lang_train_losses = []
 
     correct, violation = 0, 0
     batch_input = []
     batch_labels = []
     input_to_responses = {}
     for j, (inputs, lang_tgts, init_state, tgt_state, game_ids, entities) in enumerate(train_dataloader):
-#        if j != 0:
- #           continue
-#        print("inputs", inputs)
-#        print("lang_tgts", lang_tgts)
-#        print("init_state", init_state)
-#        print("tgt_state", tgt_state)
-#        print("game_ids", game_ids)
-#        print("entities", entities)
-#        print("##############################")
-#        print("##############################")
-#        print("##############################")
-#        print("##############################")
-#        print("============================lang_tgts")
-#        print("\n".join(tokenizer.towords_batch(lang_tgts["input_ids"])))
-#        print("============================inputs")
-#        print("\n".join(tokenizer.towords_batch(inputs["input_ids"])))
-#        print("============================tgt_state")
+#        print("train data", j)
         labels = []
         inputs_and_qs = []
-#       print(tgt_state["labels"].size())
         for q in range(tgt_state["labels"].size()[0]):
             for r in range(tgt_state["labels"].size()[1]):
-#              print(tgt_state["labels"].size(), "===>", q, r)
               if int(tgt_state["labels"][q,r]) > 0:
          #       print(q, r, tokenizer.towords(tgt_state["all_states_input_ids"][q,r]), ["?", "T", "F"][int(tgt_state["labels"][q,r])], tokenizer.towords(inputs["input_ids"][q]))
                 #print(inputs["input_ids"][q].size(), tgt_state["all_states_input_ids"][q,r].size())
-                input_here = torch.cat([inputs["input_ids"][q], to_device(torch.LongTensor([tokenizer._separator])), tgt_state["all_states_input_ids"][q,r]], dim=0)
+                input_here = torch.cat([inputs["input_ids"][q], to_device(torch.LongTensor([1])), tgt_state["all_states_input_ids"][q,r]], dim=0)
                 batch_input.append(input_here)
 
                 batch_labels.append(int(tgt_state["labels"][q,r]))
                 X = tuple(tgt_state["all_states_input_ids"][q,r].cpu().numpy().tolist())
                 Y = tuple(inputs["input_ids"][q].cpu().numpy().tolist())
-#                Y = 0
                 Z = int(tgt_state["labels"][q,r])
                 if (X,Y) in input_to_responses:
                     if input_to_responses[(X,Y)] == Z:
                       correct += 1
                     else:
-                      print(tokenizer.towords(tgt_state["all_states_input_ids"][q,r].cpu()), inputs["input_ids"][q].cpu())
                       violation += 1
+         #           print("skipping")
+                    continue
                 input_to_responses[(X,Y)] = Z
-                if len(batch_labels) % 64 == 0:
+                if len(batch_labels) % 8 == 0:
+#                  print("Got batch")
                   inputs_and_qs = batch_input
                   labels = batch_labels
 
@@ -359,45 +320,31 @@ for i in range(args.epochs):
                   batch_labels = []
                   max_length = max([x.size()[0] for x in inputs_and_qs])
                   for y in range(len(labels)):
-                      inputs_and_qs[y] = torch.cat([inputs_and_qs[y], to_device((tokenizer._pad_token + torch.zeros(max_length - inputs_and_qs[y].size()[0]))).long()], dim=0)
+                      inputs_and_qs[y] = torch.cat([inputs_and_qs[y].long(), to_device((0 + torch.zeros(max_length - inputs_and_qs[y].size()[0]).long())).long()], dim=0)
           #            print("INPUT", q, tokenizer.towords(inputs_and_qs[q]))
                   inputs_and_qs = torch.stack(inputs_and_qs, dim=0).long()
                   labels = to_device(torch.LongTensor(labels))
-          
-                  embedded = embedding(inputs_and_qs) #[:,4:5]
-                  transformed, _ = transformer(embedded)
-          
-                  prediction = torch.sigmoid(output(transformed.mean(dim=1))).view(-1)
-          #        prediction = torch.sigmoid(output(embedded[:,4]))
-          #        prediction = torch.sigmoid(embedded[:,4].mean(dim=1))
-          #        print("...")
-          #        print(embedded[:,4,0])
-          #        print("WORDS TO PREDICT FROM", tokenizer.towords(inputs_and_qs[:,4]), prediction) #, embedded[:,4].abs().max())
-           #       print(labels)
-          
-                  z = 0
-          #        for q in range(tgt_state["labels"].size()[0]):
-          #            for r in range(tgt_state["labels"].size()[1]):
-          #              if int(tgt_state["labels"][q,r]) > 0:
-          ##                print(float(prediction[z]), q, r, tokenizer.towords(tgt_state["all_states_input_ids"][q,r]), ["?", "T", "F"][int(tgt_state["labels"][q,r])], tokenizer.towords(inputs["input_ids"][q]))
-          #                print(labels[z], float(prediction[z]), q, r, tokenizer.towords(tgt_state["all_states_input_ids"][q,r]), ["?", "T", "F"][int(tgt_state["labels"][q,r])])
-          #                z += 1
-          
-            #      print(torch.where(labels == 1, prediction.log(), (1-prediction).log()))
-                  loss = -torch.where(labels == 1, prediction.log(), (1-prediction).log()).mean()
-           #       print(prediction)
-          #        print(labels)
-                  if float(loss) != float(loss):
-                     assert False
                   optimizer.zero_grad()
-                  loss.backward()
-                  torch.nn.utils.clip_grad_norm_(parameters(), max_norm=10)
+ #                 print(inputs['attention_mask'])
+#                  quit()
+#                  print(inputs_and_qs.size())
+ #                 print(inputs['attention_mask'].size())
+  #                print(labels.size())
+                  
+ #                 inputs['attention_mask'] = torch.ones(inputs_and_qs.size()[0], 1, inputs_and_qs.size()[1], inputs_and_qs.size()[1])
+#attention_mask=inputs['attention_mask'],
+                  return_dict = model(
+                      input_ids=inputs_and_qs,  labels=labels, return_dict=True #,  num_labels=2
+                  )
+                  lang_loss, dec_output, encoder_hidden = return_dict.loss, return_dict.logits, return_dict.encoder_last_hidden_state
+                  # encoder_outputs = (encoder_hidden,)
+                  lang_train_losses.append(lang_loss.item())
+                  lang_loss.backward()
                   optimizer.step()
                   num_updates += 1
-                  loss_running_average = 0.95 * loss_running_average + (1-0.95) * float(loss)
-                  if j%10 == 0:
-                      print(f"epoch {i}, batch {j}, loss: {loss.item()}", [round(x,3) for x in per_epoch[-10:-1]], loss_running_average, correct, violation, flush=True)
-                  per_epoch[-1] += float(loss)/100
+                  if j%1 == 0:
+                      print(f"epoch {i}, batch {j}, loss: {lang_loss.item()}", per_epoch[-5:], flush=True)
+    per_epoch.append(sum(lang_train_losses)/len(lang_train_losses))
 #    avg_val_loss, new_best_loss = eval_checkpoint(
 #        args, i, model, dev_dataloader, save_path=save_path, best_val_loss=best_val_loss,
 #    )

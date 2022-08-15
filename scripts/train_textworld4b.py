@@ -1,6 +1,6 @@
 # python3 train_textworld2.py --data=../../tw_data --gamefile ../../tw_data
 
-# python3 train_textworld2.py --data=../../tw_data/simple_traces/ --gamefile ../../tw_data/simple_games/
+# python3 train_textworld4b.py --data=../../tw_data/simple_traces/ --gamefile ../../tw_data/simple_games/ --device=cuda
 
 # ~/python-py37-mhahn train_textworld2.py --data=/juice/scr/mhahn/CODE/FORM-MEANING/DATA/tw_data/simple_traces --gamefile /juice/scr/mhahn/CODE/FORM-MEANING/DATA/tw_data/simple_games --device=cuda
 
@@ -167,7 +167,7 @@ class WordTokenizer(PreTrainedTokenizerBase):
         self.itos = ["OOV", "<EOS>", "<BOS>", "<PAD>", "<SEP>"]
         self.stoi = {x : i for i, x in enumerate(self.itos)}
         self._pad_token = self.stoi["<PAD>"]
-        self.model_max_length = 200
+        self.model_max_length = 400
         self._separator = self.stoi["<SEP>"]
         pass
 
@@ -214,9 +214,9 @@ def to_device(x):
   return x.cuda()
  return x
 
-transformer = to_device(torch.nn.TransformerEncoder(encoder_layer=torch.nn.TransformerEncoderLayer(d_model=64, nhead=8), num_layers=4))
-embedding = to_device(torch.nn.Embedding(num_embeddings=10000, embedding_dim=64))
-output = to_device(torch.nn.Linear(64, 1, bias=False))
+transformer = to_device(torch.nn.TransformerEncoder(encoder_layer=torch.nn.TransformerEncoderLayer(d_model=512, nhead=8), num_layers=6))
+embedding = to_device(torch.nn.Embedding(num_embeddings=10000, embedding_dim=512))
+output = to_device(torch.nn.Linear(512, 1, bias=False))
 
 def parameters():
     for x in [transformer, embedding, output]:
@@ -230,7 +230,7 @@ def parameters():
 all_parameters = [p for p in parameters() if p.requires_grad]
 #print(all_parameters)
 #quit()
-optimizer = torch.optim.Adam(all_parameters, lr=args.lr)
+optimizer = torch.optim.AdamW(all_parameters, lr=args.lr)
 
 
 print("Loaded model")
@@ -343,8 +343,9 @@ for i in range(args.epochs):
                       correct += 1
                     else:
                       violation += 1
+                    continue
                 input_to_responses[(X,Y)] = Z
-                if len(batch_labels) % 64 == 0:
+                if len(batch_labels) % 32 == 0:
                   inputs_and_qs = batch_input
                   labels = batch_labels
 
@@ -352,7 +353,7 @@ for i in range(args.epochs):
                   batch_labels = []
                   max_length = max([x.size()[0] for x in inputs_and_qs])
                   for y in range(len(labels)):
-                      inputs_and_qs[y] = torch.cat([inputs_and_qs[y], to_device((tokenizer._pad_token + torch.zeros(max_length - inputs_and_qs[y].size()[0]))).long()], dim=0)
+                      inputs_and_qs[y] = torch.cat([inputs_and_qs[y].long(), to_device((tokenizer._pad_token + torch.zeros(max_length - inputs_and_qs[y].size()[0]).long())).long()], dim=0)
           #            print("INPUT", q, tokenizer.towords(inputs_and_qs[q]))
                   inputs_and_qs = torch.stack(inputs_and_qs, dim=0).long()
                   labels = to_device(torch.LongTensor(labels))
@@ -378,6 +379,8 @@ for i in range(args.epochs):
                   optimizer.step()
                   num_updates += 1
                   loss_running_average = 0.95 * loss_running_average + (1-0.95) * float(loss)
+                  if j % 100 == 0:
+                    print(args)
                   if j%10 == 0:
                       print(f"epoch {i}, batch {j}, loss: {loss.item()}", [round(x,3) for x in per_epoch[-10:-1]], loss_running_average, correct, violation, flush=True)
                   per_epoch[-1] += float(loss)/100

@@ -348,7 +348,7 @@ for i in range(args.epochs):
                     if input_to_responses[(X,Y)] == Z:
                       correct += 1
                     else:
-                      print(tokenizer.towords(tgt_state["all_states_input_ids"][q,r].cpu()), inputs["input_ids"][q].cpu())
+                      print("VIOLATION", tokenizer.towords(tgt_state["all_states_input_ids"][q,r].cpu()), "@@@", tokenizer.towords(inputs["input_ids"][q].cpu()))
                       violation += 1
                 input_to_responses[(X,Y)] = Z
                 if len(batch_labels) % 64 == 0:
@@ -357,6 +357,7 @@ for i in range(args.epochs):
 
                   batch_input = []
                   batch_labels = []
+                  continue
                   max_length = max([x.size()[0] for x in inputs_and_qs])
                   for y in range(len(labels)):
                       inputs_and_qs[y] = torch.cat([inputs_and_qs[y], to_device((tokenizer._pad_token + torch.zeros(max_length - inputs_and_qs[y].size()[0]))).long()], dim=0)
