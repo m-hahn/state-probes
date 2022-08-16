@@ -317,7 +317,6 @@ if True:
                       violation += 1
          #           print("skipping")
                     continue
-#`                print(q, r, tokenizer.decode(tgt_state["all_states_input_ids"][q,r]), ["?", "T", "F"][int(tgt_state["labels"][q,r])], tokenizer.decode(inputs["input_ids"][q]))
                 input_to_responses[(X,Y)] = Z
                 appeared_in_train.add((X,Y))
                 DATASET.append((input_here, int(tgt_state["labels"][q,r])))
@@ -344,7 +343,7 @@ if True:
         for q in range(tgt_state["labels"].size()[0]):
             for r in range(tgt_state["labels"].size()[1]):
               if int(tgt_state["labels"][q,r]) > 0:
-#                print(q, r, tokenizer.decode(tgt_state["all_states_input_ids"][q,r]), ["?", "T", "F"][int(tgt_state["labels"][q,r])], tokenizer.decode(inputs["input_ids"][q]))
+                print(q, r, tokenizer.towords(tgt_state["all_states_input_ids"][q,r]), ["?", "T", "F"][int(tgt_state["labels"][q,r])], tokenizer.towords(inputs["input_ids"][q]))
                 #print(inputs["input_ids"][q].size(), tgt_state["all_states_input_ids"][q,r].size())
                 input_here = torch.cat([inputs["input_ids"][q], to_device(torch.LongTensor([1])), tgt_state["all_states_input_ids"][q,r]], dim=0)
                 batch_input.append(input_here)
