@@ -1,3 +1,5 @@
+import gc
+import random
 import torch
 from torch import nn
 from torch import optim
@@ -277,17 +279,14 @@ num_updates = 0
 best_update = 0
 per_epoch = []
 loss_running_average = 5
-for i in range(args.epochs):
-    print("STARTING EPOCH")
-    #if i - best_loss_epoch > args.patience: break
-    model.train()
-    lang_train_losses = []
 
+if True:
     correct, violation = 0, 0
     batch_input = []
     batch_labels = []
     input_to_responses = {}
-    for j, (inputs, lang_tgts, init_state, tgt_state, game_ids, entities) in enumerate(train_dataloader):
+    DEV_DATASET = []
+    for j, (inputs, lang_tgts, init_state, tgt_state, game_ids, entities) in enumerate(dev_dataloader):
 #        print("train data", j)
         labels = []
         inputs_and_qs = []
@@ -311,16 +310,144 @@ for i in range(args.epochs):
          #           print("skipping")
                     continue
                 input_to_responses[(X,Y)] = Z
-                if len(batch_labels) % 8 == 0:
-#                  print("Got batch")
-                  inputs_and_qs = batch_input
-                  labels = batch_labels
+                DEV_DATASET.append((input_here, int(tgt_state["labels"][q,r])))
+                if len(DEV_DATASET) % 50 == 0:
+                  print("idev dataset", len(DEV_DATASET))
+    DEV_DATASET = sorted(DEV_DATASET, key=lambda x:x[0].size()[0])
+    print("Sorted")
+    batchSize=16
+    batches_dev = [list(zip(*DEV_DATASET[i:i+batchSize])) for i in range(0,len(DEV_DATASET), batchSize)]
 
-                  batch_input = []
-                  batch_labels = []
+
+
+
+
+if True:
+    correct, violation = 0, 0
+    batch_input = []
+    batch_labels = []
+    input_to_responses = {}
+    DATASET = []
+    for j, (inputs, lang_tgts, init_state, tgt_state, game_ids, entities) in enumerate(train_dataloader):
+#        print("train data", j)
+        labels = []
+        inputs_and_qs = []
+        if len(DATASET) > 100000:
+                  break
+        for q in range(tgt_state["labels"].size()[0]):
+            if len(DATASET) > 100000:
+                  break
+            for r in range(tgt_state["labels"].size()[1]):
+              if len(DATASET) > 100000:
+                  break
+              if int(tgt_state["labels"][q,r]) > 0:
+         #       print(q, r, tokenizer.towords(tgt_state["all_states_input_ids"][q,r]), ["?", "T", "F"][int(tgt_state["labels"][q,r])], tokenizer.towords(inputs["input_ids"][q]))
+                #print(inputs["input_ids"][q].size(), tgt_state["all_states_input_ids"][q,r].size())
+                input_here = torch.cat([inputs["input_ids"][q], to_device(torch.LongTensor([1])), tgt_state["all_states_input_ids"][q,r]], dim=0)
+                batch_input.append(input_here)
+
+                batch_labels.append(int(tgt_state["labels"][q,r]))
+                X = tuple(tgt_state["all_states_input_ids"][q,r].cpu().numpy().tolist())
+                Y = tuple(inputs["input_ids"][q].cpu().numpy().tolist())
+                Z = int(tgt_state["labels"][q,r])
+                if (X,Y) in input_to_responses:
+                    if input_to_responses[(X,Y)] == Z:
+                      correct += 1
+                    else:
+                      violation += 1
+         #           print("skipping")
+                    continue
+                input_to_responses[(X,Y)] = Z
+                DATASET.append((input_here, int(tgt_state["labels"][q,r])))
+                if len(DATASET) % 50 == 0:
+                  print("dataset", len(DATASET))
+    DATASET = sorted(DATASET, key=lambda x:x[0].size()[0])
+    print("Sorted")
+    batchSize=16
+    batches = [list(zip(*DATASET[i:i+batchSize])) for i in range(0,len(DATASET), batchSize)]
+
+
+for i in range(args.epochs):
+
+
+
+    model.eval()
+
+    print("Put into batches")
+    random.Random(5).shuffle(batches)
+    j = 0
+    lang_dev_losses = []
+    for batch_input, batch_labels in batches_dev:
+#                if len(batch_labels) % 1 == 0:
+##                  print("Got batch")
+                  j += 1
+                  inputs_and_qs = list(batch_input)
+                  labels = list(batch_labels)
+
+   #               batch_input = []
+    #              batch_labels = []
                   max_length = max([x.size()[0] for x in inputs_and_qs])
                   for y in range(len(labels)):
                       inputs_and_qs[y] = torch.cat([inputs_and_qs[y].long(), to_device((0 + torch.zeros(max_length - inputs_and_qs[y].size()[0]).long())).long()], dim=0)
+                  if max_length > 290:
+                       continue
+          #            print("INPUT", q, tokenizer.towords(inputs_and_qs[q]))
+                  inputs_and_qs = torch.stack(inputs_and_qs, dim=0).long()
+                  labels = to_device(torch.LongTensor(labels))
+ #                 print(inputs['attention_mask'])
+#                  quit()
+#                  print(inputs_and_qs.size())
+ #                 print(inputs['attention_mask'].size())
+  #                print(labels.size())
+                  
+ #                 inputs['attention_mask'] = torch.ones(inputs_and_qs.size()[0], 1, inputs_and_qs.size()[1], inputs_and_qs.size()[1])
+#attention_mask=inputs['attention_mask'],
+                  if True:
+                    return_dict = model(
+                      input_ids=inputs_and_qs,  labels=labels, return_dict=True #,  num_labels=2
+                    )
+#                  except RuntimeError:
+ #                    print("OOM")
+  #                   print(max_length)
+   #                  continue
+                  lang_loss, dec_output, encoder_hidden = return_dict.loss, return_dict.logits, return_dict.encoder_last_hidden_state
+                  # encoder_outputs = (encoder_hidden,)
+                  lang_dev_losses.append(float(lang_loss.item()))
+                  num_updates += 1
+                  if j%10 == 0:
+                      print(f"DEV epoch {i}, batch {j/len(batches_dev)}, loss: {lang_loss.item()}", per_epoch[-5:], correct, violation, flush=True)
+                  lang_loss = None
+                  dec_output = None
+                  decoder_hidden = None
+                  return_dict = None
+
+
+    per_epoch.append(sum(lang_dev_losses)/len(lang_dev_losses))
+
+
+    print("STARTING EPOCH")
+    #if i - best_loss_epoch > args.patience: break
+    model.train()
+    lang_train_losses = []
+
+    print("Put into batches")
+    random.shuffle(batches)
+    j = 0
+    for batch_input, batch_labels in batches:
+#                if len(batch_labels) % 1 == 0:
+##                  print("Got batch")
+                  j += 1
+                  inputs_and_qs = list(batch_input)
+                  labels = list(batch_labels)
+
+   #               batch_input = []
+    #              batch_labels = []
+                  max_length = max([x.size()[0] for x in inputs_and_qs])
+                  for y in range(len(labels)):
+                      inputs_and_qs[y] = torch.cat([inputs_and_qs[y].long(), to_device((0 + torch.zeros(max_length - inputs_and_qs[y].size()[0]).long())).long()], dim=0)
+#                  print(max_length)
+                  if max_length > 340:
+                       continue
           #            print("INPUT", q, tokenizer.towords(inputs_and_qs[q]))
                   inputs_and_qs = torch.stack(inputs_and_qs, dim=0).long()
                   labels = to_device(torch.LongTensor(labels))
@@ -333,19 +460,33 @@ for i in range(args.epochs):
                   
  #                 inputs['attention_mask'] = torch.ones(inputs_and_qs.size()[0], 1, inputs_and_qs.size()[1], inputs_and_qs.size()[1])
 #attention_mask=inputs['attention_mask'],
-                  return_dict = model(
-                      input_ids=inputs_and_qs,  labels=labels, return_dict=True #,  num_labels=2
-                  )
-                  lang_loss, dec_output, encoder_hidden = return_dict.loss, return_dict.logits, return_dict.encoder_last_hidden_state
-                  # encoder_outputs = (encoder_hidden,)
-                  lang_train_losses.append(lang_loss.item())
-                  lang_loss.backward()
+                  try:
+                    return_dict = model(
+                        input_ids=inputs_and_qs,  labels=labels, return_dict=True #,  num_labels=2
+                    )
+                    lang_loss, dec_output, encoder_hidden = return_dict.loss, return_dict.logits, return_dict.encoder_last_hidden_state
+                    # encoder_outputs = (encoder_hidden,)
+                    lang_train_losses.append(float(lang_loss.item()))
+                    lang_loss.backward()
+                  except RuntimeError:
+                     print("OOM")
+                     print(max_length)
+                     lang_loss = None
+                     dec_output = None
+                     encoder_hidden = None
+                     return_dict = {}
+                     del return_dict
+                     gc.collect()
+                     torch.cuda.empty_cache()
+                     continue
                   optimizer.step()
                   num_updates += 1
-                  if j%1 == 0:
-                      print(f"epoch {i}, batch {j}, loss: {lang_loss.item()}", per_epoch[-5:], flush=True)
-    per_epoch.append(sum(lang_train_losses)/len(lang_train_losses))
-#    avg_val_loss, new_best_loss = eval_checkpoint(
+                  if j%10 == 0:
+                      print(f"epoch {i}, batch {j/len(batches)}, loss: {lang_loss.item()}", per_epoch[-5:], correct, violation, flush=True)
+                  lang_loss = None
+                  dec_output = None
+                  decoder_hidden = None
+                  return_dict = None#    avg_val_loss, new_best_loss = eval_checkpoint(
 #        args, i, model, dev_dataloader, save_path=save_path, best_val_loss=best_val_loss,
 #    )
 #    if new_best_loss:
